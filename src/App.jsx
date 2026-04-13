@@ -11,12 +11,12 @@ import {
   clusterVanishingPoints,
   getLinesForVP,
   lineToEndpoints,
-  MAX_VP,
 } from "./vanishingPoint.cv.js";
 
 // ── Design constants ─────────────────────────────────────────────
 
-const VP_COLORS    = ["#00f5d4", "#f72585", "#ffd60a"];
+const VP_COLORS     = ["#00f5d4", "#f72585", "#ffd60a"];
+const VP_NAMES      = ["VP 1", "VP 2", "VP 3"];
 const MAX_IMAGE_DIM = 640;
 const mono          = { fontFamily: "'Courier New', 'Lucida Console', monospace" };
 const T             = {
@@ -28,16 +28,23 @@ const T             = {
 };
 
 // ═══════════════════════════════════════════════════════════════
-// Canvas rendering (DOM-dependent, not tested)
+// Canvas rendering  (DOM-dependent, not unit-tested)
 // ═══════════════════════════════════════════════════════════════
 
-function drawVanishingPoints(ctx, vps, lines, width, height) {
+/**
+ * Draw vanishing points and their convergence lines onto `ctx`.
+ * `vpEnabled` is a boolean array; indices whose value is false are skipped.
+ */
+function drawVanishingPoints(ctx, vps, lines, width, height, vpEnabled) {
   vps.forEach((vp, i) => {
+    if (!vpEnabled[i]) return;
+
     const color   = VP_COLORS[i % VP_COLORS.length];
     const vpLines = getLinesForVP(lines, vp, width, height).slice(0, 20);
     const px      = Math.max(12, Math.min(width  - 12, vp.x));
     const py      = Math.max(12, Math.min(height - 12, vp.y));
 
+    // Convergence lines
     ctx.strokeStyle = color; ctx.lineWidth = 1.2; ctx.globalAlpha = 0.55;
     vpLines.forEach(l => {
       const pts = lineToEndpoints(l, width, height);
@@ -45,6 +52,7 @@ function drawVanishingPoints(ctx, vps, lines, width, height) {
       ctx.beginPath(); ctx.moveTo(pts[0].x, pts[0].y); ctx.lineTo(pts[1].x, pts[1].y); ctx.stroke();
     });
 
+    // Crosshair + circles
     ctx.globalAlpha = 1;
     ctx.strokeStyle = color; ctx.lineWidth = 2;
     ctx.beginPath(); ctx.moveTo(px - 14, py); ctx.lineTo(px + 14, py); ctx.stroke();
@@ -65,10 +73,25 @@ function useVanishingPoint(threshold) {
   const canvasRef  = useRef(null);
   const edgeRef    = useRef(null);
   const overlayRef = useRef(null);
+
+  // Keep the last full analysis result so we can redraw without re-analysing
+  const analysisRef = useRef(null);
+
   const [status, setStatus] = useState("idle");
   const [result, setResult] = useState(null);
 
-  const analyze = useCallback((src) => {
+  /** Redraw the overlay using stored analysis + current vpEnabled mask. */
+  const redrawOverlay = useCallback((vpEnabled) => {
+    const a = analysisRef.current;
+    if (!a) return;
+    const oc = overlayRef.current;
+    const ctx = oc.getContext("2d");
+    ctx.clearRect(0, 0, oc.width, oc.height);
+    drawVanishingPoints(ctx, a.vps, a.lines, a.width, a.height, vpEnabled);
+  }, []);
+
+  /** Full analysis pipeline — runs on new image or threshold change. */
+  const analyze = useCallback((src, vpEnabled) => {
     setStatus("processing"); setResult(null);
     const img = new window.Image();
     img.onload = () => {
@@ -76,7 +99,7 @@ function useVanishingPoint(threshold) {
       const s = MAX_IMAGE_DIM / Math.max(w, h);
       if (s < 1) { w = Math.round(w * s); h = Math.round(h * s); }
 
-      // Draw source image
+      // Source image
       const srcCanvas = canvasRef.current;
       srcCanvas.width = w; srcCanvas.height = h;
       const srcCtx = srcCanvas.getContext("2d");
@@ -91,14 +114,17 @@ function useVanishingPoint(threshold) {
       const edgeMap = renderEdgeMap(mag, w, h);
       ec.getContext("2d").putImageData(new ImageData(edgeMap.data, w, h), 0, 0);
 
-      // Line and VP detection
+      // Lines + vanishing points
       const lines = houghLines(mag, w, h, threshold);
       const vps   = clusterVanishingPoints(lines, w, h);
 
-      // Overlay
+      // Store for later redraws
+      analysisRef.current = { vps, lines, width: w, height: h };
+
+      // Initial draw
       const oc = overlayRef.current;
       oc.width = w; oc.height = h;
-      drawVanishingPoints(oc.getContext("2d"), vps, lines, w, h);
+      drawVanishingPoints(oc.getContext("2d"), vps, lines, w, h, vpEnabled);
 
       setResult({ vps, lineCount: lines.length, width: w, height: h });
       setStatus("done");
@@ -106,9 +132,13 @@ function useVanishingPoint(threshold) {
     img.src = src;
   }, [threshold]);
 
-  const reset = useCallback(() => { setStatus("idle"); setResult(null); }, []);
+  const reset = useCallback(() => {
+    analysisRef.current = null;
+    setStatus("idle");
+    setResult(null);
+  }, []);
 
-  return { canvasRef, edgeRef, overlayRef, status, result, analyze, reset };
+  return { canvasRef, edgeRef, overlayRef, status, result, analyze, redrawOverlay, reset };
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -151,17 +181,31 @@ const DataRow = ({ label, value, color = "#00f5d4" }) => (
   </div>
 );
 
-const Toggle = ({ checked, onChange, label }) => (
+const Toggle = ({ checked, onChange, label, accentColor = "#00f5d4" }) => (
   <label style={{ display: "flex", alignItems: "center", gap: 8, cursor: "pointer" }}>
-    <div onClick={onChange} style={{ width: 28, height: 16, borderRadius: 8, position: "relative", transition: "all 0.2s", background: checked ? "#00f5d444" : "#1a1a2a", border: `1px solid ${checked ? "#00f5d4" : "#333"}` }}>
-      <div style={{ width: 10, height: 10, borderRadius: "50%", position: "absolute", top: 2, left: checked ? 14 : 2, transition: "left 0.2s", background: checked ? "#00f5d4" : "#444" }} />
+    <div onClick={onChange} style={{
+      width: 28, height: 16, borderRadius: 8, position: "relative", transition: "all 0.2s",
+      background: checked ? accentColor + "44" : "#1a1a2a",
+      border: `1px solid ${checked ? accentColor : "#333"}`,
+    }}>
+      <div style={{
+        width: 10, height: 10, borderRadius: "50%", position: "absolute", top: 2,
+        left: checked ? 14 : 2, transition: "left 0.2s",
+        background: checked ? accentColor : "#444",
+      }} />
     </div>
-    <span style={{ ...T.sm, color: "#667", letterSpacing: "0.1em" }}>{label}</span>
+    {label && <span style={{ ...T.sm, color: "#667", letterSpacing: "0.1em" }}>{label}</span>}
   </label>
 );
 
 const GhostButton = ({ onClick, accent, children }) => (
-  <button onClick={onClick} style={{ ...T.sm, background: "none", cursor: "pointer", border: `1px solid ${accent ? "#00f5d444" : "#2a2a3a"}`, color: accent ? "#00f5d4" : "#667", letterSpacing: accent ? "0.2em" : "0.15em", padding: accent ? "8px 18px" : "5px 12px" }}>
+  <button onClick={onClick} style={{
+    ...T.sm, background: "none", cursor: "pointer",
+    border: `1px solid ${accent ? "#00f5d444" : "#2a2a3a"}`,
+    color: accent ? "#00f5d4" : "#667",
+    letterSpacing: accent ? "0.2em" : "0.15em",
+    padding: accent ? "8px 18px" : "5px 12px",
+  }}>
     {children}
   </button>
 );
@@ -250,38 +294,78 @@ const Controls = ({ threshold, setThreshold, showEdges, setShowEdges }) => (
   </div>
 );
 
-const VPCard = ({ vp, index }) => {
-  const color = VP_COLORS[index % VP_COLORS.length];
+/**
+ * Card for a single vanishing point.
+ * VP 1 (index 0) is always enabled and shows no toggle.
+ * VP 2 and VP 3 (index 1, 2) have a coloured toggle to enable/disable them.
+ */
+const VPCard = ({ vp, index, enabled, onToggle }) => {
+  const color      = VP_COLORS[index % VP_COLORS.length];
+  const canToggle  = index > 0;
+  const dimmed     = canToggle && !enabled;
+
   return (
-    <div style={{ padding: 8, marginBottom: 6, border: `1px solid ${color}33`, background: color + "08" }}>
-      <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 4 }}>
-        <div style={{ width: 6, height: 6, background: color, borderRadius: "50%" }} />
-        <span style={{ ...T.sm, color, letterSpacing: "0.1em" }}>VP {index + 1}</span>
+    <div style={{
+      padding: 8, marginBottom: 6,
+      border: `1px solid ${dimmed ? "#2a2a3a" : color + "33"}`,
+      background: dimmed ? "#0d0d1a" : color + "08",
+      transition: "all 0.25s",
+    }}>
+      {/* Card header — name + optional toggle */}
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: dimmed ? 0 : 4 }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+          <div style={{ width: 6, height: 6, borderRadius: "50%", background: dimmed ? "#333" : color, transition: "background 0.25s" }} />
+          <span style={{ ...T.sm, color: dimmed ? "#445" : color, letterSpacing: "0.1em", transition: "color 0.25s" }}>
+            {VP_NAMES[index]}
+          </span>
+        </div>
+        {canToggle && (
+          <Toggle
+            checked={enabled}
+            onChange={onToggle}
+            accentColor={color}
+          />
+        )}
       </div>
-      <div style={{ ...T.xs, color: "#556", lineHeight: 1.8 }}>
-        X: {Math.round(vp.x)} / Y: {Math.round(vp.y)}<br />SUPPORT: {vp.support} lines
-      </div>
+
+      {/* Coordinates — hidden when disabled */}
+      {!dimmed && (
+        <div style={{ ...T.xs, color: "#556", lineHeight: 1.8 }}>
+          X: {Math.round(vp.x)} / Y: {Math.round(vp.y)}<br />SUPPORT: {vp.support} lines
+        </div>
+      )}
+      {dimmed && (
+        <div style={{ ...T.xs, color: "#333", letterSpacing: "0.08em", marginTop: 2 }}>DISABLED</div>
+      )}
     </div>
   );
 };
 
-const ResultStats = ({ result }) => !result ? null : (
+const ResultStats = ({ result, vpEnabled, onToggleVP }) => !result ? null : (
   <div>
     <SectionLabel>RESULTS</SectionLabel>
     <DataRow label="LINES FOUND" value={result.lineCount} />
     <DataRow label="VANISH PTS"  value={result.vps.length} />
     <DataRow label="IMAGE"       value={`${result.width}×${result.height}`} />
     <div style={{ marginTop: 16 }}>
-      {result.vps.map((vp, i) => <VPCard key={i} vp={vp} index={i} />)}
+      {result.vps.map((vp, i) => (
+        <VPCard
+          key={i}
+          vp={vp}
+          index={i}
+          enabled={vpEnabled[i]}
+          onToggle={() => onToggleVP(i)}
+        />
+      ))}
     </div>
   </div>
 );
 
-const Sidebar = ({ threshold, setThreshold, showEdges, setShowEdges, result }) => (
+const Sidebar = ({ threshold, setThreshold, showEdges, setShowEdges, result, vpEnabled, onToggleVP }) => (
   <div style={{ width: 220, background: "#0d0d1a", borderRight: "1px solid #1e1e2e", padding: "24px 18px", flexShrink: 0, display: "flex", flexDirection: "column", gap: 24 }}>
     <AlgorithmSteps />
     <Controls threshold={threshold} setThreshold={setThreshold} showEdges={showEdges} setShowEdges={setShowEdges} />
-    <ResultStats result={result} />
+    <ResultStats result={result} vpEnabled={vpEnabled} onToggleVP={onToggleVP} />
   </div>
 );
 
@@ -337,21 +421,41 @@ const ImagePanel = ({ status, result, showEdges, canvasRef, edgeRef, overlayRef,
 // ═══════════════════════════════════════════════════════════════
 
 export default function VanishingPointApp() {
-  const [threshold, setThreshold] = useState(80);
-  const [showEdges, setShowEdges] = useState(false);
+  const [threshold,  setThreshold]  = useState(80);
+  const [showEdges,  setShowEdges]  = useState(false);
+  // VP 1 is always on; VP 2 and VP 3 start enabled but can be toggled off
+  const [vpEnabled,  setVpEnabled]  = useState([true, true, true]);
 
-  const { canvasRef, edgeRef, overlayRef, status, result, analyze, reset } = useVanishingPoint(threshold);
-  const { imageSrc, fileRef, handleFile, handleDrop, openPicker, clearImage } = useImageLoader(analyze);
+  const { canvasRef, edgeRef, overlayRef, status, result, analyze, redrawOverlay, reset } =
+    useVanishingPoint(threshold);
 
-  useEffect(() => { if (imageSrc) analyze(imageSrc); }, [threshold]);
+  const { imageSrc, fileRef, handleFile, handleDrop, openPicker, clearImage } =
+    useImageLoader((src) => analyze(src, vpEnabled));
 
-  const handleClear = () => { clearImage(); reset(); };
+  // Re-run full analysis when threshold changes
+  useEffect(() => { if (imageSrc) analyze(imageSrc, vpEnabled); }, [threshold]);
+
+  // Only redraw overlay (no re-analysis) when VP toggles change
+  useEffect(() => { redrawOverlay(vpEnabled); }, [vpEnabled]);
+
+  const handleToggleVP = (index) => {
+    // VP 1 (index 0) cannot be disabled
+    if (index === 0) return;
+    setVpEnabled(prev => prev.map((v, i) => i === index ? !v : v));
+  };
+
+  const handleClear = () => { clearImage(); reset(); setVpEnabled([true, true, true]); };
 
   return (
     <div style={{ minHeight: "100vh", background: "#0a0a0f", color: "#e8e8e8", ...mono, overflowX: "hidden" }}>
       <Header status={status} />
       <div style={{ display: "flex", minHeight: "calc(100vh - 73px)" }}>
-        <Sidebar threshold={threshold} setThreshold={setThreshold} showEdges={showEdges} setShowEdges={setShowEdges} result={result} />
+        <Sidebar
+          threshold={threshold} setThreshold={setThreshold}
+          showEdges={showEdges} setShowEdges={setShowEdges}
+          result={result}
+          vpEnabled={vpEnabled} onToggleVP={handleToggleVP}
+        />
         <div style={{ flex: 1, padding: "28px 32px", display: "flex", flexDirection: "column", gap: 20 }}>
           {!imageSrc
             ? <DropZone onDrop={handleDrop} onClick={openPicker} />
